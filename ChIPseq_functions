@@ -1,0 +1,35 @@
+# Adapter trimming and quality filtering of FASTQ files
+Trim Galore (v0.6.7)
+Citation: Babraham Bioinformatics
+
+# Alignment to the mouse genome (GRCm38/mm10)
+Bowtie2 (v2.4.2)
+Citation: Langmead & Salzberg, Nat Methods, 2012
+
+# Sorting and deduplication of BAM files
+SAMtools (v1.13)
+Citation: Li et al., Bioinformatics, 2009
+
+# Peak calling (H3K9ac, H3K14ac, H3K9bhb)
+MACS2 (v2.2.9.1)	
+Citation: Zhang et al., Genome Biol, 2008
+
+# Intersecting and comparing genomic intervals
+BEDtools (v2.3.0)	
+Citation: Quinlan & Hall, Bioinformatics, 2010
+
+# Peak annotation and motif analysis
+HOMER (v4.1)
+Citation: http://homer.ucsd.edu/homer/
+
+# Signal processing, normalization, heatmap visualization
+DeepTools (v3.3.1)
+• bamCoverage	–	Generate BigWig files from BAM	
+• bamCompare	–	Log₂ fold change comparison	
+• computeMatrix	–	Compute score matrices for visualization	
+• plotHeatmap	–	Plot heatmaps	
+Citation: Ramírez et al., Nucleic Acids Res, 2016
+
+# Genome browser for visualization
+Integrative Genomics Viewer	(IGV, v2.17)	
+Citation: Robinson et al., Nat Biotechnol, 2011
