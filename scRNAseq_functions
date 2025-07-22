@@ -1,0 +1,208 @@
+# load libraries
+library(Seurat)
+library(SeuratData)
+library(patchwork)
+library(SeuratObject)
+library(ggplot2)
+library(tidyr)
+library(gridExtra)
+library(tidyverse)
+library(macrtools)
+library(usethis)
+library(dplyr)
+library(writexl)
+library(SingleR)
+library(celldex)
+library(pheatmap)
+library(monocle3)
+library(SeuratWrappers)
+
+# Load the dataset
+OR03_Ctrl.data <- Read10X(data.dir = '.../O03_Ctrl_feature_bc_matrix')
+OR04_13BD.data <- Read10X(data.dir = '.../O04_13BD_feature_bc_matrix')
+OR05_KO.data <- Read10X(data.dir = '.../O05_KO_feature_bc_matrix')
+OR06_P56.data <- Read10X(data.dir = '/Users/laipeixiang/Desktop/scRNAseq-our/O06_P56_feature_bc_matrix')
+ 
+# Initialize the Seurat object
+O03_Ctrl <- CreateSeuratObject(counts = OR03_Ctrl.data, project = "CTL", min.cells = 3, min.features = 200)
+O04_13BD <- CreateSeuratObject(counts = OR04_13BD.data, project = "1,3BD", min.cells = 3, min.features = 200)
+O05_KO <- CreateSeuratObject(counts = OR05_KO.data, project = "KO", min.cells = 3, min.features = 200)
+O06_P56 <- CreateSeuratObject(counts = OR06_P56.data, project = "Adult", min.cells = 3, min.features = 200)
+
+O03_Ctrl@meta.data$sample <- "CTL"
+O04_13BD@meta.data$sample <- "1,3BD"
+O05_KO@meta.data$sample <- "KO"
+O06_P56@meta.data$sample <- "Adult"
+
+# Merge the Seurat objects
+merged_OUR <- merge(O03_Ctrl, y = c(O04_13BD, O05_KO, O06_P56),
+      add.cell.ids = ls()[1:4],
+      project = 'Our_data')
+
+# Calculate MT reads and filtering
+DefaultAssay(merged_OUR) <- "RNA"
+merged_OUR$percent.mt <- PercentageFeatureSet(merged_OUR, pattern = "^mt-")
+VlnPlot(merged_OUR, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+merged_OUR <- subset(merged_OUR, subset = nFeature_RNA > 500 & nFeature_RNA < 6500 & percent.mt < 10)
+
+# Normalization
+obj.list.our <- SplitObject(merged_OUR, split.by = "sample")
+obj.list.our <- lapply(X = obj.list.our ,
+                   FUN = function(x) {
+                     x <- NormalizeData(x)
+                     x <- FindVariableFeatures(x , 
+                                               selection.method = 'vst' ,
+                                               nfeatures = 2000)
+                   })
+
+# Integration
+features.our <- SelectIntegrationFeatures(obj.list.our)
+anchors.our <- FindIntegrationAnchors(object.list = obj.list.our, anchor.features = features.our)
+merged_our.integrated <- IntegrateData(anchorset =anchors.our)
+
+# Scaling data
+DefaultAssay(merged_our.integrated) <- 'integrated'
+merged_our.integrated <- ScaleData(merged_our.integrated)
+
+# Perform principal component analysis
+merged_our.integrated <- RunPCA(object = merged_our.integrated)
+
+# Determine dimensionality of the data
+ElbowPlot(merged_our.integrated)
+
+# Cell clustering
+merged_our.integrated <- FindNeighbors(merged_our.integrated, dims = 1:15)
+merged_our.integrated <- FindClusters(merged_our.integrated, resolution = 0.2)
+
+# Run reduction
+merged_our.integrated <- RunUMAP(merged_our.integrated , reduction = 'pca' , dims = 1:15)
+merged_our.integrated$sample <- factor(x = merged_our.integrated$sample, levels = c("CTL", "KO", "1,3BD","Adult"))
+
+# Save data
+saveRDS(merged_our.integrated , 'merged_our.integrated.rds')
+
+# Identify cell markers
+DefaultAssay(merged_our.integrated) <- 'RNA'
+our.markers <- FindAllMarkers(JoinLayers(merged_our.integrated), only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# SingleR-based cell annotation
+singleR.ref <- celldex::MouseRNAseqData()
+merged_our.integrated_counts <- GetAssayData(JoinLayers(merged_our.integrated), slot = 'counts')
+pred <- SingleR(test = merged_our.integrated_counts, 
+        ref = singleR.ref, 
+        labels = singleR.ref$label.fine)
+merged_our.integrated$singleR_labels <- pred$labels
+
+# Rename the cell clusters
+merged_our.integrated[["old.ident"]] <- Idents(object = merged_our.integrated)
+merged_our.integrated <- RenameIdents(object = merged_our.integrated, '0' = "ASC0", '1' = "ASC1", '2' = "ASC2a", '3' = "ASC2b", '4' = "Fibro", '5' = "a-Fibro", '6' = "Endo", '7' = "NPCs")
+
+# Plot heatmap of top markers
+our.markers.top10 <- our.markers %>%
+    group_by(cluster) %>%
+    slice_head(n = 10)
+DoHeatmap(JoinLayers(merged_our.integrated), features = our.markers.top10$gene) + NoLegend()
+
+# Count cells by cell type and treatment
+table(merged_our.integrated@meta.data$celltype.treat)
+
+# Pseudotemporal trajectory analysis
+Subset_C0_3 <- subset(merged_our.integrated, idents = c('ASC0', 'ASC1', 'ASC2a', 'ASC2b'))
+DefaultAssay(Subset_C0_3) <- 'RNA'
+cds <- as.cell_data_set(JoinLayers(Subset_C0_3))
+
+recreate.partition <- c(rep(1,length(cds@colData@rownames)))
+names(recreate.partition) <- cds@colData@rownames
+recreate.partition <- as.factor(recreate.partition)
+cds@clusters$UMAP$partitions <- recreate.partition
+
+list_cluster <- Subset_C0_3@active.ident
+cds@clusters$UMAP$clusters <- list_cluster
+cds@int_colData@listData$reducedDims$UMAP <- Subset_C0_3@reductions$umap@cell.embeddings
+
+cds <- learn_graph(cds, use_partition = FALSE)
+plot_cells(cds,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = F,
+           label_roots = F,
+           label_leaves = F,
+           group_label_size = 5)
+
+cds <- order_cells(cds, reduction_method = 'UMAP', root_cells = colnames(cds[,clusters(cds) == 'ASC0']))
+plot_cells(cds,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           trajectory_graph_color = "green2",
+           label_branch_points = FALSE,
+           label_roots = F,
+           label_leaves = F)
+
+# Split 'Adult' with remain groups
+Idents(merged_our.integrated) <- "sample"
+C_K_B <- subset(merged_our.integrated, idents = c('CTL','KO','1,3BD'))
+Adult <- subset(merged_our.integrated, idents = 'Adult')
+Idents(C_K_B) <- "celltype"
+Idents(Adult) <- "celltype"
+Idents(merged_our.integrated) <- "celltype"
+
+# Plot UMAP
+UMAP <- DimPlot(merged_our.integrated, reduction = 'umap')+theme(legend.position = 'right', axis.text = element_text(size = 14), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+UMAP_split <- DimPlot(merged_our.integrated, split.by = "sample") +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+
+# Plot feature plots
+Pdgfra <- FeaturePlot(merged_our.integrated, features = "Pdgfra",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+Ly6a <- FeaturePlot(merged_our.integrated, features = "Ly6a",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+Cemip <- FeaturePlot(merged_our.integrated, features = "Cemip",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7) 
+Ndrg4 <- FeaturePlot(merged_our.integrated, features = "Ndrg4",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7) 
+Scd1 <- FeaturePlot(merged_our.integrated, features = "Scd1",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+Lpl <- FeaturePlot(merged_our.integrated, features = "Lpl",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+Ccnb1 <- FeaturePlot(merged_our.integrated, features = "Ccnb1",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+Cdc20 <- FeaturePlot(merged_our.integrated, features = "Cdc20",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7) 
+Ccne1 <- FeaturePlot(merged_our.integrated, features = "Ccne1",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+Ccne2 <- FeaturePlot(merged_our.integrated, features = "Ccne2",ncol = 1, min.cutoff = 'q10' , max.cutoff = 'q90') + NoLegend() + NoAxes() + xlim(-7,10) + ylim(-10, 7)
+
+DefaultAssay(C_K_B) <- 'RNA'
+Pparg_CKB <- FeaturePlot(C_K_B, features = "Pparg", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') &NoAxes()
+Rreb1_CKB <- FeaturePlot(C_K_B, features = "Rreb1", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') &NoAxes()
+Cd81_CKB <- FeaturePlot(C_K_B, features = "Cd81", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') &NoAxes()
+Tfam_CKB <- FeaturePlot(C_K_B, features = "Tfam", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') &NoAxes()
+Klf9_CKB <- FeaturePlot(C_K_B, features = "Klf9", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') &NoAxes()
+Vdr_CKB <- FeaturePlot(C_K_B, features = "Vdr", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') &NoAxes()
+
+DefaultAssay(Adult) <- 'RNA'
+Pparg_adult <- FeaturePlot(Adult, features = "Pparg", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') +NoAxes() + xlim(-7,10) +theme(text = element_text(face = 'bold'))
+Rreb1_adult <- FeaturePlot(Adult, features = "Rreb1", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') +NoAxes() + xlim(-7,10) +theme(text = element_text(face = 'bold'))
+Cd81_adult <- FeaturePlot(Adult, features = "Cd81", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') +NoAxes() + xlim(-7,10) +theme(text = element_text(face = 'bold'))
+Tfam_adult <- FeaturePlot(Adult, features = "Tfam", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') +NoAxes() + xlim(-7,10) +theme(text = element_text(face = 'bold'))
+Klf9_adult <- FeaturePlot(Adult, features = "Klf9", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') +NoAxes() + xlim(-7,10) +theme(text = element_text(face = 'bold'))
+Vdr_adult <- FeaturePlot(Adult, features = "Vdr", ncol = 1, split.by = "sample",min.cutoff = 'q10' , max.cutoff = 'q90') +NoAxes() + xlim(-7,10) +theme(text = element_text(face = 'bold'))
+
+# Plot violin plots
+C_K_B$sample <- factor(x = C_K_B$sample, levels = c("CTL", "KO", "1,3BD"))
+Tgfbr3_Vln <- VlnPlot(C_K_B, features = "Tgfbr3", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 3.5, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Jun_Vln <- VlnPlot(C_K_B, features = "Jun", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 3.5, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Hsd17b7_Vln <- VlnPlot(C_K_B, features = "Hsd17b7", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 3.5, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ero1a_Vln <- VlnPlot(C_K_B, features = "Ero1a", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 3.5, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Scd1_Vln <- VlnPlot(C_K_B, features = "Scd1", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 7, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Lpl_Vln <- VlnPlot(C_K_B, features = "Lpl", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 6, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Tnfrsf12a_Vln <- VlnPlot(C_K_B, features = "Tnfrsf12a", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 2.5, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Phlda1_Vln <- VlnPlot(C_K_B, features = "Phlda1", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 3, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ccl7_Vln <- VlnPlot(C_K_B, features = "Ccl7", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 4, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ptgs2_Vln <- VlnPlot(C_K_B, features = "Ptgs2", pt.size = F, cols = c('white','green3','blue'), idents = 'ASC1' ,split.by = 'sample', y.max = 3.5, ncol = 1) +xlab(' ') +theme(legend.position = 'right', axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+
+Pdgfra_Vln <- VlnPlot(merged_our.integrated, features = "Pdgfra", pt.size = F, y.max = 2.5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ly6a_Vln <- VlnPlot(merged_our.integrated, features = "Ly6a", pt.size = F, y.max = 5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Cemip_Vln <- VlnPlot(merged_our.integrated, features = "Cemip", pt.size = F, y.max = 3.5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ndrg4_Vln <- VlnPlot(merged_our.integrated, features = "Ndrg4", pt.size = F, y.max = 2.5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Scd1_Vln <- VlnPlot(merged_our.integrated, features = "Scd1", pt.size = F, y.max = 7) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Lpl_Vln <- VlnPlot(merged_our.integrated, features = "Lpl", pt.size = F, y.max = 5.5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ccnb1_Vln <- VlnPlot(merged_our.integrated, features = "Ccnb1", pt.size = F, y.max = 3) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Cdc20_Vln <- VlnPlot(merged_our.integrated, features = "Cdc20", pt.size = F, y.max = 3) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ccne1_Vln <- VlnPlot(merged_our.integrated, features = "Ccne1", pt.size = F, y.max = 2.5) +NoLegend() + xlab(' ')+theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Ccne2_Vln <- VlnPlot(merged_our.integrated, features = "Ccne2", pt.size = F, y.max = 2.5) +NoLegend() + xlab(' ')+theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Vim_Vln <- VlnPlot(merged_our.integrated, features = "Vim", pt.size = F, y.max = 5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Acta2_Vln <- VlnPlot(merged_our.integrated, features = "Acta2", pt.size = F, y.max = 6.5) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Tie1_Vln <- VlnPlot(merged_our.integrated, features = "Tie1", pt.size = F, y.max = 3) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
+Sox2_Vln <- VlnPlot(merged_our.integrated, features = "Sox2", pt.size = F, y.max = 3) +NoLegend() + xlab(' ') +theme(axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 16), axis.title = element_text(size = 16), text = element_text(face = 'bold'),axis.line = element_line(linewidth = 1),axis.ticks = element_line(linewidth = 1))
