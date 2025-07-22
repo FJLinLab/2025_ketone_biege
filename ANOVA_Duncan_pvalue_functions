@@ -1,0 +1,53 @@
+# Install packages
+if (!require(DescTools)) install.packages("DescTools")
+if (!require(openxlsx)) install.packages("openxlsx")
+
+library(DescTools)
+library(openxlsx)
+
+# Generate sample data
+group <- c(
+  rep("SK", 8),
+  rep("EW", 5),
+  rep("EW-MCT", 7)
+)
+
+value <- c(
+  # SK
+  1.05, 1.32, 1.14, 0.97, 1.08, 1.33, 0.54, 0.78,
+  # EW
+  0.04, 0.19, 0.04, 0.05, 0.05,
+  # EW-MCT
+  0.63, 0.35, 0.8, 0.84, 1.24, 1.66, 1.32
+)
+
+# Organize the dataframe and set the group order
+df <- data.frame(Group = factor(group, levels = c("SK", "EW", "EW-MCT")), Value = value)
+
+# Perform one-way ANOVA and Duncan's post hoc test
+res <- aov(Value ~ Group, data = df)
+duncan_result <- PostHocTest(res, method = "duncan")
+
+# Convert Duncan test result to a dataframe
+duncan_df <- as.data.frame(duncan_result$Group)
+duncan_df$Comparison <- rownames(duncan_df)
+duncan_df <- duncan_df[, c("Comparison", "diff", "lwr.ci", "upr.ci", "pval")]
+colnames(duncan_df) <- c("Comparison", "Difference", "Lower CI", "Upper CI", "P value")
+
+# Calculate sample size (n) for each group and create group labels
+group_n <- as.data.frame(table(df$Group))
+group_n$Label <- paste0(group_n$Var1, " (n = ", group_n$Freq, ")")
+
+# Create an Excel workbook and add a worksheet
+wb <- createWorkbook()
+addWorksheet(wb, "Duncan Test")
+
+# Write the title and group sample sizes (n) to the worksheet
+writeData(wb, "Duncan Test", "Posthoc multiple comparisons of means : Duncan's new multiple range test – 95% family-wise confidence level", startRow = 1, startCol = 1)
+writeData(wb, "Duncan Test", paste(group_n$Label, collapse = "; "), startRow = 2, startCol = 1)
+
+# Write Duncan test results to the worksheet
+writeData(wb, "Duncan Test", duncan_df, startRow = 4, startCol = 1)
+
+# Save the Excel workbook
+saveWorkbook(wb, "duncan_with_title_and_n.xlsx", overwrite = TRUE)
