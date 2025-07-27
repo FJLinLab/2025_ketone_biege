@@ -1,0 +1,65 @@
+# Install packages
+install.packages(c("dplyr", "tidyr", "emmeans", "openxlsx", "tibble"))
+library(dplyr)
+library(tidyr)
+library(emmeans)
+library(openxlsx)
+library(tibble)
+
+# ========= Step 1: Input data ==========
+# Raw data
+raw_data <- tribble(
+  ~Group,              ~V1,     ~V2,     ~V3,     ~V4,     ~V5,     ~V6,     ~V7,     ~V8,     ~V9,     ~V10,
+  "P7_Ln-F1-Water",    1.5,     1.31,    1.144,   NA,      NA,      NA,      NA,      NA,      NA,     NA,
+  "P7_Ln-F1-1,3BD",    2.593,   2.16,    2.07,    1.831,   NA,      NA,      NA,      NA,      NA,     NA,
+  "P7_Ob-F1-Water",    0.88,    0.81,    1.271,   1.754,   1.093,   0.89,    NA,      NA,      NA,     NA,
+  "P7_Ob-F1-1,3BD",    1.98,    1.98,    1.71,    1.61,    2.466,   1.958,   1.703,   2.466,   2.212,  NA
+)
+
+# Long format
+long_df <- raw_data %>%
+  pivot_longer(cols = starts_with("V"), names_to = "Rep", values_to = "Value") %>%
+  filter(!is.na(Value)) %>%
+  mutate(
+    Genotype = case_when(
+      grepl("Ln", Group) ~ "Ln-F1",
+      grepl("Ob", Group) ~ "Ob-F1"
+    ),
+    Treatment = case_when(
+      grepl("1,3BD", Group) ~ "1,3BD",
+      grepl("Water", Group) ~ "Water"
+    ),
+    ID = paste(Genotype, Treatment, sep = "_")
+  ) %>%
+  select(Group, ID, Value, Genotype, Treatment)
+
+# ========= Step 2: ANOVA and Tukey ==========
+# Two-way ANOVA
+anova_model <- aov(Value ~ Genotype * Treatment, data = long_df)
+anova_result <- summary(anova_model)
+anova_df <- as.data.frame(anova_result[[1]]) %>%
+  rownames_to_column(var = "Effect")
+
+# Tukey post-hoc test
+em <- emmeans(anova_model, ~ Genotype * Treatment)
+tukey_df <- as.data.frame(pairs(em, adjust = "tukey"))
+
+# ========= Step 3: Output to Excel ==========
+wb <- createWorkbook()
+addWorksheet(wb, "Extended Data Figure 10n")
+
+# Header annotation
+writeData(wb, "Extended Data Figure 10n", x = "Extended Data Figure 10n", startCol = 1, startRow = 1)
+writeData(wb, "Extended Data Figure 10n", x = "Statistical method: Two-way ANOVA with Tukey's multiple comparisons test", startCol = 1, startRow = 2)
+
+# Data block
+writeData(wb, "Extended Data Figure 10n", x = long_df, startCol = 1, startRow = 4)
+
+# ANOVA block
+writeData(wb, "Extended Data Figure 10n", x = anova_df, startCol = 7, startRow = 4)
+
+# Tukey block
+writeData(wb, "Extended Data Figure 10n", x = tukey_df, startCol = 13, startRow = 4)
+
+# Save
+saveWorkbook(wb, "Extended_Data_Figure_10n.xlsx", overwrite = TRUE)
