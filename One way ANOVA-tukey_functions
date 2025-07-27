@@ -1,0 +1,58 @@
+# Install packages
+install.packages(c("dplyr", "tidyr", "emmeans", "openxlsx", "tibble"))
+
+library(dplyr)
+library(tidyr)
+library(emmeans)
+library(openxlsx)
+library(tibble)
+
+# ===== Step 1: Input data =====
+raw_data <- tribble(
+  ~Group,       ~V1,     ~V2,     ~V3,     ~V4,     ~V5,   ~V6,   ~V7,   ~V8,   ~V9,   ~V10,
+  "SK",         1.159,   0.97,    1.057,   1.14,    NA,   NA,   NA,   NA,   NA,   NA,
+  "EW",         1.359,   1.33,    1.36,    1.27,    NA,   NA,   NA,   NA,   NA,   NA,
+  "EW-MCT",     1.245,   1.153,   1.16,    1.2,     NA,   NA,   NA,   NA,   NA,   NA
+)
+
+# Convert to long format
+long_df <- raw_data %>%
+  pivot_longer(cols = starts_with("V"), names_to = "Rep", values_to = "Value") %>%
+  filter(!is.na(Value)) %>%
+  mutate(GroupCombo = Group)
+
+# Calculate sample size (N)
+n_df <- long_df %>%
+  group_by(GroupCombo) %>%
+  summarise(N = n(), .groups = "drop")
+
+# ===== Step 2: One-way ANOVA + Tukey =====
+model <- aov(Value ~ GroupCombo, data = long_df)
+anova_df <- as.data.frame(summary(model)[[1]]) %>%
+  rownames_to_column("Effect")
+
+em <- emmeans(model, ~ GroupCombo)
+tukey_df <- as.data.frame(pairs(em, adjust = "tukey")) %>%
+  select(contrast, estimate, SE, df, t.ratio, p.value)
+
+# ===== Step 3: Output to Excel =====
+wb <- createWorkbook()
+addWorksheet(wb, "Figure 1f-liver")
+
+writeData(wb, 1, "Figure 1f-liver", startCol = 1, startRow = 1)
+writeData(wb, 1, "Statistical method: One-way ANOVA with Tukey's multiple comparisons test", startCol = 1, startRow = 2)
+
+# ANOVA block
+writeData(wb, 1, anova_df, startCol = 1, startRow = 4)
+
+# Sample size (N) block
+n_start_row <- 4 + nrow(anova_df) + 2
+writeData(wb, 1, "Sample size per group (N):", startCol = 1, startRow = n_start_row - 1)
+writeData(wb, 1, n_df, startCol = 1, startRow = n_start_row)
+
+# Tukey block
+tukey_start_row <- n_start_row + nrow(n_df) + 2
+writeData(wb, 1, tukey_df, startCol = 1, startRow = tukey_start_row)
+
+# Save
+saveWorkbook(wb, "Figure_1f-liver.xlsx", overwrite = TRUE)
