@@ -16,7 +16,7 @@ raw_data <- tribble(
   "P7_Ob-F1-1,3BD",    1.98,    1.98,    1.71,    1.61,    2.466,   1.958,   1.703,   2.466,   2.212,  NA
 )
 
-# Long format
+# Convert to long format and create group annotations
 long_df <- raw_data %>%
   pivot_longer(cols = starts_with("V"), names_to = "Rep", values_to = "Value") %>%
   filter(!is.na(Value)) %>%
@@ -34,13 +34,13 @@ long_df <- raw_data %>%
   select(Group, ID, Value, Genotype, Treatment)
 
 # ========= Step 2: ANOVA and Tukey ==========
-# Two-way ANOVA
+# Perform Two-way ANOVA
 anova_model <- aov(Value ~ Genotype * Treatment, data = long_df)
 anova_result <- summary(anova_model)
 anova_df <- as.data.frame(anova_result[[1]]) %>%
   rownames_to_column(var = "Effect")
 
-# Tukey post-hoc test
+# Perform Tukey post-hoc test
 em <- emmeans(anova_model, ~ Genotype * Treatment)
 tukey_df <- as.data.frame(pairs(em, adjust = "tukey"))
 
@@ -48,7 +48,7 @@ tukey_df <- as.data.frame(pairs(em, adjust = "tukey"))
 wb <- createWorkbook()
 addWorksheet(wb, "Extended Data Figure 10n")
 
-# Header annotation
+# Add header annotation
 writeData(wb, "Extended Data Figure 10n", x = "Extended Data Figure 10n", startCol = 1, startRow = 1)
 writeData(wb, "Extended Data Figure 10n", x = "Statistical method: Two-way ANOVA with Tukey's multiple comparisons test", startCol = 1, startRow = 2)
 
